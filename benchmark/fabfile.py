@@ -3,10 +3,22 @@ from fabric import task
 
 from benchmark.local import LocalBench
 from benchmark.logs import ParseError, LogParser
-from benchmark.utils import Print
-from benchmark.plot import Ploter, PlotError
-from benchmark.instance import InstanceManager
-from benchmark.remote import Bench, BenchError
+from benchmark.utils import BenchError, Print
+
+
+def _gcp_instance_manager():
+    from benchmark.instance import InstanceManager
+    return InstanceManager
+
+
+def _gcp_bench():
+    from benchmark.remote import Bench
+    return Bench
+
+
+def _cloudlab_bench():
+    from benchmark.cloudlab_remote import CloudLabBench
+    return CloudLabBench
 
 
 @task
@@ -45,7 +57,7 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
 def create(ctx, nodes=2):
     ''' Create a testbed'''
     try:
-        InstanceManager.make().create_instances(nodes)
+        _gcp_instance_manager().make().create_instances(nodes)
     except BenchError as e:
         Print.error(e)
 
@@ -54,7 +66,7 @@ def create(ctx, nodes=2):
 def destroy(ctx):
     ''' Destroy the testbed '''
     try:
-        InstanceManager.make().delete_instances()
+        _gcp_instance_manager().make().delete_instances()
     except BenchError as e:
         Print.error(e)
 
@@ -63,7 +75,7 @@ def destroy(ctx):
 def start(ctx):
     ''' Start at most `max` machines per data center '''
     try:
-        InstanceManager.make().start_instances()
+        _gcp_instance_manager().make().start_instances()
     except BenchError as e:
         Print.error(e)
 
@@ -72,7 +84,7 @@ def start(ctx):
 def stop(ctx):
     ''' Stop all machines '''
     try:
-        InstanceManager.make().stop_instances()
+        _gcp_instance_manager().make().stop_instances()
     except BenchError as e:
         Print.error(e)
 
@@ -81,7 +93,7 @@ def stop(ctx):
 def info(ctx):
     ''' Display connect information about all the available machines '''
     try:
-        InstanceManager.make().print_info()
+        _gcp_instance_manager().make().print_info()
     except BenchError as e:
         Print.error(e)
 
@@ -90,7 +102,7 @@ def info(ctx):
 def install(ctx):
     ''' Install the codebase on all machines '''
     try:
-        Bench(ctx).install()
+        _gcp_bench()(ctx).install()
     except BenchError as e:
         Print.error(e)
 
@@ -129,14 +141,130 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'f_num': 3,
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug, consensus_only)
+        _gcp_bench()(ctx).run(
+            bench_params,
+            node_params,
+            debug,
+            consensus_only,
+        )
     except BenchError as e:
         Print.error(e)
 
 
 @task
+def cloudlab_install(ctx, max_workers=8):
+    ''' Initialize CloudLab and install Angelfish on all CloudLab nodes '''
+    from environment_setup import (
+        EnvironmentSetupError,
+        setup_environment,
+    )
+
+    try:
+        # Prepare this local controller and every configured CloudLab node.
+        setup_environment(max_workers=int(max_workers))
+        # Import AsyncSSH only after the local Python setup is complete.
+        _cloudlab_bench()(ctx).install()
+    except EnvironmentSetupError as error:
+        Print.error(BenchError(
+            'CloudLab environment setup failed',
+            error,
+        ))
+    except BenchError as error:
+        Print.error(error)
+
+
+@task
+def cloudlab_remote(
+    ctx,
+    nodes=4,
+    rate=80000,
+    burst=50,
+    duration=60,
+    runs=1,
+    debug=False,
+    consensus_only=False,
+    header_size=512,
+):
+    ''' Run the remote benchmark workflow entirely on CloudLab '''
+    from environment_setup import (
+        EnvironmentSetupError,
+        setup_local_environment,
+    )
+
+    try:
+        setup_local_environment(check_only=True)
+
+        nodes = int(nodes)
+        rate = int(rate)
+        burst = int(burst)
+        duration = int(duration)
+        runs = int(runs)
+        header_size = int(header_size)
+        if nodes <= 1:
+            raise ValueError('nodes must be greater than one')
+        if rate <= 0:
+            raise ValueError('rate must be greater than zero')
+        if burst <= 0:
+            raise ValueError('burst must be greater than zero')
+        if duration <= 0:
+            raise ValueError('duration must be greater than zero')
+        if runs <= 0:
+            raise ValueError('runs must be greater than zero')
+        if header_size <= 0:
+            raise ValueError('header-size must be greater than zero')
+
+        f_num = (nodes - 1) // 3
+        bench_params = {
+            'faults': 0,
+            'nodes': nodes,
+            'workers': 1,
+            'collocate': True,
+            # Aggregate target input rate across all CloudLab clients.
+            'rate': [rate],
+            'tx_size': 512,
+            'duration': duration,
+            'runs': runs,
+            'burst': [burst],
+        }
+        node_params = {
+            'consensus_only': bool(consensus_only),
+            'header_size': header_size * 10000,
+            'max_header_delay': 200,
+            'gc_depth': 50,
+            'sync_retry_delay': 10_000,
+            'sync_retry_nodes': min(3, nodes - 1),
+            'batch_size': header_size,
+            'tx_size': bench_params['tx_size'],
+            'max_batch_delay': 200,
+            'leaders_per_round': (2 * nodes + 2) // 3,
+            'propose_rate': 0.8,
+            'f_num': f_num,
+        }
+        _cloudlab_bench()(ctx).run(
+            bench_params,
+            node_params,
+            bool(debug),
+            bool(consensus_only),
+        )
+    except EnvironmentSetupError as error:
+        Print.error(BenchError(
+            'CloudLab local controller is not initialized',
+            error,
+        ))
+    except (TypeError, ValueError) as error:
+        Print.error(BenchError(
+            'Invalid CloudLab benchmark parameters',
+            error,
+        ))
+    except BenchError as error:
+        Print.error(error)
+
+
+@task
 def plot(ctx):
     ''' Plot performance using the logs generated by "fab remote" '''
+    from benchmark.plot import Ploter, PlotError
+
     plot_params = {
         'faults': [0],
         'nodes': [10, 20, 50],
@@ -155,7 +283,7 @@ def plot(ctx):
 def kill(ctx):
     ''' Stop execution on all machines '''
     try:
-        Bench(ctx).kill()
+        _gcp_bench()(ctx).kill()
     except BenchError as e:
         Print.error(e)
 

@@ -1,5 +1,6 @@
 google-cloud==0.34.0
 fabric==3.0.0
+asyncssh>=2.13.0,<3.0.0
 matplotlib==3.3.4
 google-cloud-compute==1.18.0
 decorator==5.1.1
