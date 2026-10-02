@@ -403,6 +403,40 @@ mkdir -p logs results
             f'Uploaded configuration to {len(results)} CloudLab node(s)'
         )
 
+    async def _upload_parameters(self, hosts, connections, node_parameters):
+        """Rewrite and push `.parameters.json` without regenerating keys."""
+        node_parameters.print(PathMaker.parameters_file())
+        filename = PathMaker.parameters_file()
+        tasks = []
+        for host in hosts:
+            tasks.append(self._upload_parameters_one(
+                host, connections[host], filename
+            ))
+        results = await asyncio.gather(*tasks)
+        failures = [
+            (host, result)
+            for host, result in results
+            if isinstance(result, Exception)
+        ]
+        if failures:
+            details = '; '.join(
+                f'{host}: {error}' for host, error in failures
+            )
+            raise CloudLabExecutionError(
+                f'CloudLab parameters upload failed: {details}'
+            )
+
+    @staticmethod
+    async def _upload_parameters_one(host, connection, filename):
+        try:
+            async with connection.start_sftp_client() as sftp:
+                await sftp.put(filename, Path(filename).name)
+            return host, None
+        except Exception as error:
+            return host, CloudLabExecutionError(
+                f'failed to upload parameters to {host}: {error}'
+            )
+
     @staticmethod
     async def _start_process(host, connection, command, log_file):
         try:
@@ -640,6 +674,7 @@ pkill -x benchmark_client 2>/dev/null || true
         nodes,
         bench_parameters,
         consensus_only,
+        propose_rate,
     ):
         Print.info('Parsing logs and computing performance...')
         logger = LogParser.process(
@@ -663,6 +698,7 @@ pkill -x benchmark_client 2>/dev/null || true
             logger.rate = (rate,)
 
         summary = logger.result()
+        propose_tag = str(propose_rate).replace('.', 'p')
         result_path = Path(PathMaker.result_file(
             bench_parameters.faults,
             nodes,
@@ -671,9 +707,16 @@ pkill -x benchmark_client 2>/dev/null || true
             rate,
             bench_parameters.tx_size,
         ))
+        result_path = result_path.with_name(
+            f'{result_path.stem}-pr{propose_tag}{result_path.suffix}'
+        )
         result_path.parent.mkdir(parents=True, exist_ok=True)
         with result_path.open('a') as output:
+            output.write(
+                f' Propose rate: {propose_rate}\n'
+            )
             output.write(summary)
+        print(f'Propose rate: {propose_rate}')
         print(summary)
 
     async def _run(
@@ -684,6 +727,7 @@ pkill -x benchmark_client 2>/dev/null || true
         debug,
         consensus_only,
         update,
+        propose_rates,
     ):
         connections = await self._connect_all(hosts)
         try:
@@ -713,44 +757,60 @@ pkill -x benchmark_client 2>/dev/null || true
                 committee_copy.remove_nodes(
                     committee.size() - nodes
                 )
-                for burst in bench_parameters.burst:
-                    rate = bench_parameters.rate[0]
+                for propose_rate in propose_rates:
+                    node_parameters.json['propose_rate'] = float(propose_rate)
                     Print.heading(
-                        f'Running {nodes} CloudLab nodes '
-                        f'(input rate: {rate:,} tx/s, '
-                        f'burst: {burst:,} ms)'
+                        f'Propose rate: {propose_rate}'
                     )
-                    for run_index in range(bench_parameters.runs):
-                        Print.heading(
-                            f'Run {run_index + 1}/'
-                            f'{bench_parameters.runs}'
-                        )
-                        try:
-                            await self._run_single(
-                                rate,
-                                burst,
-                                committee_copy,
-                                bench_parameters,
-                                connections,
-                                debug,
-                                consensus_only,
+                    await self._upload_parameters(
+                        hosts[:nodes],
+                        {
+                            host: connections[host]
+                            for host in hosts[:nodes]
+                            if host in connections
+                        },
+                        node_parameters,
+                    )
+                    for rate in bench_parameters.rate:
+                        for burst in bench_parameters.burst:
+                            Print.heading(
+                                f'Running {nodes} CloudLab nodes '
+                                f'(input rate: {rate:,} tx/s, '
+                                f'burst: {burst:,} ms, '
+                                f'propose_rate: {propose_rate})'
                             )
-                            await self._download_logs(
-                                consensus_only,
-                                committee_copy,
-                                bench_parameters.faults,
-                                connections,
-                            )
-                            self._parse_and_store(
-                                burst,
-                                rate,
-                                nodes,
-                                bench_parameters,
-                                consensus_only,
-                            )
-                        except Exception:
-                            await self._kill(connections)
-                            raise
+                            for run_index in range(bench_parameters.runs):
+                                Print.heading(
+                                    f'Run {run_index + 1}/'
+                                    f'{bench_parameters.runs}'
+                                )
+                                try:
+                                    await self._run_single(
+                                        rate,
+                                        burst,
+                                        committee_copy,
+                                        bench_parameters,
+                                        connections,
+                                        debug,
+                                        consensus_only,
+                                    )
+                                    await self._download_logs(
+                                        consensus_only,
+                                        committee_copy,
+                                        bench_parameters.faults,
+                                        connections,
+                                    )
+                                    self._parse_and_store(
+                                        burst,
+                                        rate,
+                                        nodes,
+                                        bench_parameters,
+                                        consensus_only,
+                                        propose_rate,
+                                    )
+                                except Exception:
+                                    await self._kill(connections)
+                                    raise
         finally:
             await self._close_all(connections)
 
@@ -761,6 +821,7 @@ pkill -x benchmark_client 2>/dev/null || true
         debug=False,
         consensus_only=False,
         update=True,
+        propose_rates=None,
     ):
         """Run the original remote workflow against CloudLab only."""
         Print.heading('Starting CloudLab benchmark')
@@ -776,6 +837,16 @@ pkill -x benchmark_client 2>/dev/null || true
                 raise ConfigError(
                     'Burst values must be positive integers'
                 )
+            if propose_rates is None:
+                propose_rates = [float(node_parameters.json['propose_rate'])]
+            else:
+                propose_rates = [float(value) for value in propose_rates]
+            if not propose_rates or any(
+                not 0 < value <= 1 for value in propose_rates
+            ):
+                raise ConfigError(
+                    'propose_rates must be values in (0, 1]'
+                )
             selected_hosts = self._select_hosts(bench_parameters)
             asyncio.run(self._run(
                 selected_hosts,
@@ -784,6 +855,7 @@ pkill -x benchmark_client 2>/dev/null || true
                 bool(debug),
                 bool(consensus_only),
                 bool(update),
+                propose_rates,
             ))
         except BenchError:
             raise
@@ -806,5 +878,27 @@ pkill -x benchmark_client 2>/dev/null || true
         connections = await self._connect_all(hosts)
         try:
             await self._kill(connections)
+        finally:
+            await self._close_all(connections)
+
+    def test_connections(self):
+        """Verify SSH connectivity to every configured CloudLab host."""
+        try:
+            asyncio.run(self._test_connections())
+        except Exception as error:
+            raise BenchError(
+                'CloudLab connection test failed', error
+            ) from error
+
+    async def _test_connections(self):
+        hosts = self.manager.hosts(flat=True)
+        if not hosts:
+            raise CloudLabExecutionError('No CloudLab hosts configured')
+        Print.heading(f'Testing SSH to {len(hosts)} CloudLab node(s)')
+        connections = await self._connect_all(hosts)
+        try:
+            for host in hosts:
+                Print.info(f'OK {host}')
+            Print.heading('All CloudLab connections succeeded')
         finally:
             await self._close_all(connections)

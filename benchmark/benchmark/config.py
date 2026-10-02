@@ -263,6 +263,12 @@ class BenchParameters:
             self.runs = int(json['runs']) if 'runs' in json else 1
 
             self.burst = json['burst']
+            self.burst = (
+                self.burst if isinstance(self.burst, list) else [self.burst]
+            )
+            self.burst = [int(x) for x in self.burst]
+            if not self.burst or any(x <= 0 for x in self.burst):
+                raise ConfigError('Missing or invalid burst')
             
         except KeyError as e:
             raise ConfigError(f'Malformed bench parameters: missing key {e}')
