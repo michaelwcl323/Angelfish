@@ -698,18 +698,21 @@ pkill -x benchmark_client 2>/dev/null || true
             logger.rate = (rate,)
 
         summary = logger.result()
-        propose_tag = str(propose_rate).replace('.', 'p')
-        result_path = Path(PathMaker.result_file(
+        # Folder names: Angelfish-0.4pr, Angelfish-1pr (drop trailing .0).
+        propose_label = (
+            f'{propose_rate:g}'
+            if float(propose_rate) != int(propose_rate)
+            else f'{int(propose_rate)}'
+        )
+        result_dir = Path(PathMaker.results_path()) / f'Angelfish-{propose_label}pr'
+        result_path = result_dir / Path(PathMaker.result_file(
             bench_parameters.faults,
             nodes,
             bench_parameters.workers,
             bench_parameters.collocate,
             rate,
             bench_parameters.tx_size,
-        ))
-        result_path = result_path.with_name(
-            f'{result_path.stem}-pr{propose_tag}{result_path.suffix}'
-        )
+        )).name
         result_path.parent.mkdir(parents=True, exist_ok=True)
         with result_path.open('a') as output:
             output.write(
@@ -717,6 +720,7 @@ pkill -x benchmark_client 2>/dev/null || true
             )
             output.write(summary)
         print(f'Propose rate: {propose_rate}')
+        print(f'Result file: {result_path}')
         print(summary)
 
     async def _run(
