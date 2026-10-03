@@ -217,7 +217,7 @@ def _parse_float_list(value, default):
 @task
 def cloudlab_remote(
     ctx,
-    rates='20000,40000,60000,80000,100000,120000',
+    rates='20000,40000,60000,80000,100000,120000,140000,160000,180000,200000',
     propose_rates='0.4,1',
     runs=2,
     duration=120,
@@ -233,15 +233,16 @@ def cloudlab_remote(
         setup_local_environment,
     )
 
-    # Align with ISS CloudLab matrix: 500 B txs, 4096-tx batches, 1 s delay.
+    # Match Angelfish CloudLab params: 500 B txs, 4096-tx batches, 5 MB headers.
     tx_size = 500
     batch_requests = 4096
-    header_size = 1_000
+    header_size = 5_000_000
     try:
         setup_local_environment(check_only=True)
 
         rate_list = _parse_int_list(
-            rates, [20000, 40000, 60000, 80000, 100000, 120000]
+            rates,
+            [20000, 40000, 60000, 80000, 100000, 120000, 140000, 160000, 180000, 200000],
         )
         propose_rate_list = _parse_float_list(propose_rates, [0.4, 1.0])
         if not rate_list or any(rate <= 0 for rate in rate_list):
@@ -278,10 +279,10 @@ def cloudlab_remote(
         node_params = {
             'consensus_only': bool(consensus_only),
             'header_size': header_size,
-            'max_header_delay': 200,
+            'max_header_delay': 2000,
             'gc_depth': 50,
             'sync_retry_delay': 10_000,
-            'sync_retry_nodes': min(3, nodes - 1),
+            'sync_retry_nodes': min(7, nodes - 1),
             'batch_size': batch_requests * tx_size,  # bytes == 4096 txs
             'tx_size': tx_size,
             'max_batch_delay': 1000,  # ms, matches ISS BATCH_DELAY

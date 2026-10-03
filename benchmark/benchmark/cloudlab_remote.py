@@ -191,6 +191,8 @@ if [ ! -d "$HOME/$REPO_NAME/.git" ]; then
     git clone --branch "$BRANCH" "$REPO_URL" "$HOME/$REPO_NAME"
 fi
 
+# Old nodes may already have $REPO_NAME cloned from a different origin.
+git -C "$HOME/$REPO_NAME" remote set-url origin "$REPO_URL"
 git -C "$HOME/$REPO_NAME" fetch origin "$BRANCH"
 git -C "$HOME/$REPO_NAME" checkout "$BRANCH"
 git -C "$HOME/$REPO_NAME" pull --ff-only origin "$BRANCH"
@@ -692,15 +694,21 @@ pkill -x benchmark_client 2>/dev/null || true
             logger.rate = (rate,)
 
         summary = logger.result()
-        result_path = Path(PathMaker.result_file(
+        # Folder names: Sailfish-0.4pr, Sailfish-1pr (drop trailing .0).
+        propose_label = (
+            f'{propose_rate:g}'
+            if float(propose_rate) != int(propose_rate)
+            else f'{int(propose_rate)}'
+        )
+        result_dir = Path(PathMaker.results_path()) / f'Sailfish-{propose_label}pr'
+        result_path = result_dir / Path(PathMaker.result_file(
             bench_parameters.faults,
             nodes,
             bench_parameters.workers,
             bench_parameters.collocate,
             rate,
             bench_parameters.tx_size,
-            propose_rate,
-        ))
+        )).name
         result_path.parent.mkdir(parents=True, exist_ok=True)
         with result_path.open('a') as output:
             output.write(
@@ -708,6 +716,7 @@ pkill -x benchmark_client 2>/dev/null || true
             )
             output.write(summary)
         print(f'Propose rate: {propose_rate}')
+        print(f'Result file: {result_path}')
         print(summary)
 
     async def _run(

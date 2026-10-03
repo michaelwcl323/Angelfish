@@ -83,10 +83,15 @@ class PathMaker:
 
     @staticmethod
     def result_file(faults, nodes, workers, collocate, rate, tx_size, propose_rate=None):
-        propose_rate = '' if propose_rate is None else f'-pr{str(propose_rate).replace(".", "p")}'
+        # CloudLab puts propose_rate in the parent folder; GCP may still
+        # append it to the filename when provided.
+        propose_tag = (
+            '' if propose_rate is None
+            else f'-pr{str(propose_rate).replace(".", "p")}'
+        )
         return join(
             PathMaker.results_path(),
-            f'bench-{faults}-{nodes}-{workers}-{collocate}-{rate}-{tx_size}{propose_rate}.txt'
+            f'bench-{faults}-{nodes}-{workers}-{collocate}-{rate}-{tx_size}{propose_tag}.txt'
         )
 
     @staticmethod
