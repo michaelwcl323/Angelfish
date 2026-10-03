@@ -2,6 +2,7 @@ node
 benchmark_client
 results
 plots
+cloudlab_settings.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
