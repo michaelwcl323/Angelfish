@@ -22,6 +22,44 @@ def _cloudlab_bench():
 
 
 @task
+def cloudlab_paper(ctx, header_sizes='32000,64000,128000,256000,512000,768000',
+                   propose_rates='0.4,0.8,1', nodes=10, duration=120, runs=2,
+                   output_dir='', debug=False, update=True, resume=False, tx_size=500):
+    ''' Sweep vertex payloads: configurable tx size, 500 ms timeout, no clients. '''
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from benchmark.cloudlab_paper import PaperCloudLabBench
+    from environment_setup import setup_local_environment
+
+    setup_local_environment(check_only=True)
+    sizes = _parse_int_list(header_sizes, [])
+    proposals = _parse_float_list(propose_rates, [])
+    nodes, duration, runs, tx_size = int(nodes), int(duration), int(runs), int(tx_size)
+    if nodes <= 1 or duration <= 0 or runs <= 0 or tx_size <= 0:
+        raise ValueError('nodes > 1, duration > 0, runs > 0 and tx-size > 0 required')
+    if not sizes or any(size < tx_size or size > tx_size * 10_000 for size in sizes):
+        raise ValueError('header-sizes must hold between 1 and 10000 transactions')
+    if not proposals or any(not 0 < value <= 1 for value in proposals):
+        raise ValueError('propose-rates must be in (0, 1]')
+    if not output_dir:
+        output_dir = str(Path('results/paper') / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
+    bench = {
+        'faults': 0, 'nodes': [nodes], 'workers': 1, 'collocate': True,
+        'rate': [0], 'tx_size': tx_size, 'duration': duration, 'runs': runs, 'burst': [50],
+    }
+    params = {
+        'consensus_only': True, 'header_size': sizes[0], 'max_header_delay': 500,
+        'gc_depth': 50, 'sync_retry_delay': 10_000, 'sync_retry_nodes': min(3, nodes - 1),
+        'batch_size': sizes[0], 'tx_size': tx_size, 'max_batch_delay': 200,
+        'leaders_per_round': 1, 'propose_rate': proposals[0], 'f_num': (nodes - 1) // 3,
+    }
+    PaperCloudLabBench(ctx, sizes, output_dir, 'Sailfish', resume=bool(resume)).run(
+        bench, params, bool(debug), True, update=bool(update), propose_rates=proposals,
+    )
+
+
+
+@task
 def local(ctx, debug=False, consensus_only=True, header_size=512_000):
     ''' Run benchmarks on localhost '''
     bench_params = {
@@ -279,7 +317,7 @@ def cloudlab_remote(
         node_params = {
             'consensus_only': bool(consensus_only),
             'header_size': header_size,
-            'max_header_delay': 2000,
+            'max_header_delay': 1000,
             'gc_depth': 50,
             'sync_retry_delay': 10_000,
             'sync_retry_nodes': min(7, nodes - 1),
