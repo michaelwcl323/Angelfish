@@ -21,41 +21,122 @@ def _cloudlab_bench():
     return CloudLabBench
 
 
+def _cloudlab_paper_bench():
+    from benchmark.cloudlab_paper import PaperCloudLabBench
+    return PaperCloudLabBench
+
+
 @task
-def cloudlab_paper(ctx, header_sizes='32000,64000,128000,256000,512000,768000',
-                   propose_rates='0.4,0.8,1', nodes=10, duration=120, runs=2,
-                   output_dir='', debug=False, update=True, resume=False, tx_size=500):
-    ''' Sweep vertex payloads: configurable tx size, 500 ms timeout, no clients. '''
+def cloudlab_paper(
+    ctx,
+    header_sizes='32000,64000,128000,256000,512000,768000',
+    propose_rates='0.4,0.8,1',
+    nodes=10,
+    duration=120,
+    runs=2,
+    output_dir='',
+    debug=False,
+    update=True,
+    resume=False,
+    tx_size=500,
+):
+    ''' Run CloudLab payload sweeps; header-sizes/propose-rates may be comma-separated. '''
     from datetime import datetime, timezone
     from pathlib import Path
-    from benchmark.cloudlab_paper import PaperCloudLabBench
-    from environment_setup import setup_local_environment
-
-    setup_local_environment(check_only=True)
-    sizes = _parse_int_list(header_sizes, [])
-    proposals = _parse_float_list(propose_rates, [])
-    nodes, duration, runs, tx_size = int(nodes), int(duration), int(runs), int(tx_size)
-    if nodes <= 1 or duration <= 0 or runs <= 0 or tx_size <= 0:
-        raise ValueError('nodes > 1, duration > 0, runs > 0 and tx-size > 0 required')
-    if not sizes or any(size < tx_size or size > tx_size * 10_000 for size in sizes):
-        raise ValueError('header-sizes must hold between 1 and 10000 transactions')
-    if not proposals or any(not 0 < value <= 1 for value in proposals):
-        raise ValueError('propose-rates must be in (0, 1]')
-    if not output_dir:
-        output_dir = str(Path('results/paper') / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
-    bench = {
-        'faults': 0, 'nodes': [nodes], 'workers': 1, 'collocate': True,
-        'rate': [0], 'tx_size': tx_size, 'duration': duration, 'runs': runs, 'burst': [50],
-    }
-    params = {
-        'consensus_only': True, 'header_size': sizes[0], 'max_header_delay': 500,
-        'gc_depth': 50, 'sync_retry_delay': 10_000, 'sync_retry_nodes': min(3, nodes - 1),
-        'batch_size': sizes[0], 'tx_size': tx_size, 'max_batch_delay': 200,
-        'leaders_per_round': 1, 'propose_rate': proposals[0], 'f_num': (nodes - 1) // 3,
-    }
-    PaperCloudLabBench(ctx, sizes, output_dir, 'Angelfish', resume=bool(resume)).run(
-        bench, params, bool(debug), True, update=bool(update), propose_rates=proposals,
+    from invoke import Exit
+    from environment_setup import (
+        EnvironmentSetupError,
+        setup_local_environment,
     )
+
+    try:
+        setup_local_environment(check_only=True)
+
+        header_size_list = _parse_int_list(header_sizes, [])
+        propose_rate_list = _parse_float_list(propose_rates, [])
+        nodes = int(nodes)
+        duration = int(duration)
+        runs = int(runs)
+        tx_size = int(tx_size)
+        if nodes <= 1:
+            raise ValueError('nodes must be greater than one')
+        if duration <= 0:
+            raise ValueError('duration must be greater than zero')
+        if runs <= 0:
+            raise ValueError('runs must be greater than zero')
+        if tx_size <= 0:
+            raise ValueError('tx-size must be greater than zero')
+        if not header_size_list or any(
+            size < tx_size or size > tx_size * 10_000
+            for size in header_size_list
+        ):
+            raise ValueError('header-sizes must hold between 1 and 10000 transactions')
+        if not propose_rate_list or any(
+            not 0 < value <= 1 for value in propose_rate_list
+        ):
+            raise ValueError('propose-rates must be in (0, 1]')
+
+        if not output_dir:
+            run_tag = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+            output_dir = str(Path('results/paper') / run_tag)
+
+        f_num = (nodes - 1) // 3
+        bench_params = {
+            'faults': 0,
+            'nodes': [nodes],
+            'workers': 1,
+            'collocate': True,
+            # Required by BenchParameters; unused with consensus-only enabled.
+            'rate': [0],
+            'tx_size': tx_size,
+            'duration': duration,
+            'runs': runs,
+            'burst': [50],
+        }
+        node_params = {
+            'consensus_only': True,
+            'header_size': header_size_list[0],  # bytes; runner scans the list
+            'max_header_delay': 1000,  # ms
+            'gc_depth': 50,
+            'sync_retry_delay': 10_000,  # ms
+            'sync_retry_nodes': min(3, nodes - 1),
+            'batch_size': header_size_list[0],  # bytes; follows each header size
+            'tx_size': tx_size,
+            'max_batch_delay': 1000,  # ms
+            'leaders_per_round': 1,
+            # Seed value; runner uploads each matrix propose_rate.
+            'propose_rate': propose_rate_list[0],
+            'f_num': f_num,
+        }
+        _cloudlab_paper_bench()(
+            ctx,
+            header_size_list,
+            output_dir,
+            'Angelfish',
+            resume=bool(resume),
+        ).run(
+            bench_params,
+            node_params,
+            bool(debug),
+            True,  # consensus_only: payloads are generated by the nodes
+            update=bool(update),
+            propose_rates=propose_rate_list,
+        )
+    except EnvironmentSetupError as error:
+        Print.error(BenchError(
+            'CloudLab local controller is not initialized',
+            error,
+        ))
+        raise Exit(code=1) from error
+    except (TypeError, ValueError) as error:
+        Print.error(BenchError(
+            'Invalid CloudLab paper benchmark parameters',
+            error,
+        ))
+        raise Exit(code=1) from error
+    except BenchError as error:
+        Print.error(error)
+        raise Exit(code=1) from error
 
 
 
@@ -260,7 +341,7 @@ def _parse_float_list(value, default):
 @task
 def cloudlab_remote(
     ctx,
-    rates='20000,40000,60000,80000,100000,120000,140000,160000,180000,200000',
+    rates='40000,80000,120000,160000,200000',
     propose_rates='0.4,1',
     runs=2,
     duration=120,
@@ -276,16 +357,16 @@ def cloudlab_remote(
         setup_local_environment,
     )
 
-    # Align with ISS CloudLab matrix: 500 B txs, 4096-tx batches, 1 s delay.
+    # Use the same 4096-tx payload size for batches and headers, with 200 ms delays.
     tx_size = 500
     batch_requests = 4096
-    header_size = 5_000_000
+    header_size = batch_requests * tx_size
     try:
         setup_local_environment(check_only=True)
 
         rate_list = _parse_int_list(
             rates,
-            [20000, 40000, 60000, 80000, 100000, 120000, 140000, 160000, 180000, 200000],
+            [40000, 80000, 120000, 160000, 200000],
         )
         propose_rate_list = _parse_float_list(propose_rates, [0.4, 1.0])
         if not rate_list or any(rate <= 0 for rate in rate_list):
@@ -322,13 +403,13 @@ def cloudlab_remote(
         node_params = {
             'consensus_only': bool(consensus_only),
             'header_size': header_size,
-            'max_header_delay': 1000,
+            'max_header_delay': 200,
             'gc_depth': 50,
             'sync_retry_delay': 10_000,
             'sync_retry_nodes': min(7, nodes - 1),
             'batch_size': batch_requests * tx_size,  # bytes == 4096 txs
             'tx_size': tx_size,
-            'max_batch_delay': 1000,  # ms, matches ISS BATCH_DELAY
+            'max_batch_delay': 200,  # ms
             'leaders_per_round': (2 * nodes + 2) // 3,
             # Seed value; CloudLabBench syncs each matrix propose_rate.
             'propose_rate': propose_rate_list[0],
